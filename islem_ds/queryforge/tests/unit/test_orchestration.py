@@ -41,7 +41,7 @@ class TestOrchestration(unittest.TestCase):
     def test_tool_dispatcher_raises_tool_loop_error_at_max(self):
         dispatcher = ToolDispatcher()
         tool = CalculatorTool()
-        _REGISTRY["calculate"] = tool
+        register(tool)
         with self.assertRaises(ToolLoopError):
             dispatcher.dispatch("calculate", {"expression": "2+2"}, 6)
 
@@ -52,7 +52,7 @@ class TestOrchestration(unittest.TestCase):
                 raise ValueError("Oops I crashed")
         
         tool = CrashingTool()
-        _REGISTRY["crasher"] = tool
+        register(tool)
         dispatcher = ToolDispatcher()
         result = dispatcher.dispatch("crasher", {}, 1)
         
@@ -106,8 +106,8 @@ class TestOrchestration(unittest.TestCase):
         result = runner.run("What is 2+2?", "User1")
         
         self.assertEqual(result.answer, "The answer is 4.")
-        self.assertEqual(result.tool_calls_made, 1)
-        mock_dispatch.assert_called_once_with(tool_name="calculate", arguments={"expression": "2+2"}, iteration=0)
+        self.assertEqual(result.tool_calls_made, ["calculate"])
+        mock_dispatch.assert_called_once_with(tool_name="calculate", arguments={"expression": "2+2"}, iteration=1)
 
 class TestKnowledgeBaseTool(TestCase):
     
@@ -123,3 +123,38 @@ class TestKnowledgeBaseTool(TestCase):
         self.assertTrue(result.success)
         self.assertEqual(len(result.data), 1)
         self.assertEqual(result.data[0]["title"], "Django Tips")
+
+    @patch('apps.orchestration.runner.LLMGateway')
+    @patch('apps.orchestration.tools.registry.ToolDispatcher.dispatch')
+    def test_workflow_runner_tool_calls_made_is_list_of_strings(self, mock_dispatch, mock_gateway_class):
+        mock_gateway = mock_gateway_class.return_value
+        
+        # Mock LLM response with one tool call
+        mock_response = MagicMock()
+        mock_response.content = ""
+        mock_tool_call = MagicMock()
+        mock_tool_call.function.name = "calculate"
+        mock_tool_call.function.arguments = "{\"expression\": \"2+2\"}"
+        mock_tool_call.id = "test-call-id"
+        mock_response.tool_calls = [mock_tool_call]
+        
+        # Mock final response without tool calls
+        mock_final_response = MagicMock()
+        mock_final_response.content = "The result is 4."
+        mock_final_response.tool_calls = None
+        
+        mock_gateway.complete.side_effect = [mock_response, mock_final_response]
+        
+        # Tool returns successful result
+        mock_dispatch.return_value = ToolResult(success=True, data={"result": 4})
+        
+        runner = WorkflowRunner()
+        runner._gateway = mock_gateway
+        
+        result = runner.run("What is 2+2?", "User1")
+        
+        # Verify tool_calls_made is a list of strings
+        self.assertIsInstance(result.tool_calls_made, list)
+        self.assertEqual(len(result.tool_calls_made), 1)
+        self.assertEqual(result.tool_calls_made[0], "calculate")
+        self.assertTrue(all(isinstance(call, str) for call in result.tool_calls_made))
